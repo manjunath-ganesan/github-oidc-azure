@@ -1,0 +1,242 @@
+name: Azure OIDC - Resource Group & Storage Container
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - create
+          - delete
+      resource_group_name:
+        description: 'Azure Resource Group Name'
+        required: true
+        default: 'rg-github-oidc-demo'
+        type: string
+      storage_account_name:
+        description: 'Storage Account Name (3-24 lowercase letters & numbers)'
+        required: true
+        type: string
+      container_name:
+        description: 'Blob Container Name'
+        required: true
+        default: 'demo-container'
+        type: string
+      azure_region:
+        description: 'Azure Region / Location'
+        required: false
+        default: 'eastus'
+        type: string
+      delete_target:
+        description: 'Target to delete when action is "delete"'
+        required: false
+        default: 'entire_resource_group'
+        type: choice
+        options:
+          - container_only
+          - storage_account
+          - entire_resource_group
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  manage-azure-resources:
+    name: Manage Azure Storage Resources
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Manage Resource Group and Storage Container
+        run: |
+          ACTION="${{ inputs.action }}"
+          RG_NAME="${{ inputs.resource_group_name }}"
+          STORAGE_ACCOUNT="${{ inputs.storage_account_name }}"
+          CONTAINER_NAME="${{ inputs.container_name }}"
+          LOCATION="${{ inputs.azure_region }}"
+          DELETE_TARGET="${{ inputs.delete_target }}"
+
+          handle_failure() {
+            local FAILED_STEP="$1"
+            local ERROR_OUTPUT="$2"
+
+            {
+              echo "## ❌ Azure Operation Failed"
+              echo ""
+              echo "| Parameter | Value |"
+              echo "| --- | --- |"
+              echo "| **Action** | \`${ACTION}\` |"
+              echo "| **Failed Step** | ${FAILED_STEP} |"
+              echo "| **Resource Group** | \`${RG_NAME}\` |"
+              echo "| **Storage Account** | \`${STORAGE_ACCOUNT}\` |"
+              echo "| **Container Name** | \`${CONTAINER_NAME}\` |"
+              echo "| **Azure Region** | \`${LOCATION}\` |"
+              echo "| **Status** | ❌ Failed |"
+              echo ""
+              echo "### Error Details"
+              echo "\`\`\`text"
+              echo "${ERROR_OUTPUT}"
+              echo "\`\`\`"
+            } >> $GITHUB_STEP_SUMMARY
+
+            exit 1
+          }
+
+          # Validate storage account name: must be 3-24 lowercase alphanumeric characters
+          if [[ ! "${STORAGE_ACCOUNT}" =~ ^[a-z0-9]{3,24}$ ]]; then
+            handle_failure "Input Validation" "Invalid storage account name: '${STORAGE_ACCOUNT}'. Storage account names must be between 3 and 24 characters and contain only lowercase letters and numbers."
+          fi
+
+          if [ "${ACTION}" = "create" ]; then
+            echo "============================================="
+            echo "🚀 Starting CREATE Operation"
+            echo "============================================="
+
+            # 1. Resource Group
+            echo "Checking if Resource Group '${RG_NAME}' exists..."
+            RG_EXISTS=$(az group exists --name "${RG_NAME}" --output tsv)
+            if [ "${RG_EXISTS}" = "true" ]; then
+              echo "Resource Group '${RG_NAME}' already exists."
+              RG_STATUS="Already Exists"
+            else
+              echo "Creating Resource Group '${RG_NAME}' in '${LOCATION}'..."
+              if CREATE_RG_OUT=$(az group create --name "${RG_NAME}" --location "${LOCATION}" 2>&1); then
+                RG_STATUS="Created Successfully"
+              else
+                handle_failure "Create Resource Group" "${CREATE_RG_OUT}"
+              fi
+            fi
+
+            # 2. Storage Account
+            echo "Checking if Storage Account '${STORAGE_ACCOUNT}' exists in '${RG_NAME}'..."
+            if az storage account show --name "${STORAGE_ACCOUNT}" --resource-group "${RG_NAME}" --output none 2>/dev/null; then
+              echo "Storage Account '${STORAGE_ACCOUNT}' already exists."
+              SA_STATUS="Already Exists"
+            else
+              echo "Creating Storage Account '${STORAGE_ACCOUNT}'..."
+              if CREATE_SA_OUT=$(az storage account create \
+                --name "${STORAGE_ACCOUNT}" \
+                --resource-group "${RG_NAME}" \
+                --location "${LOCATION}" \
+                --sku Standard_LRS \
+                --encryption-services blob 2>&1); then
+                SA_STATUS="Created Successfully"
+              else
+                handle_failure "Create Storage Account" "${CREATE_SA_OUT}"
+              fi
+            fi
+
+            # 3. Storage Blob Container
+            echo "Checking if Blob Container '${CONTAINER_NAME}' exists in '${STORAGE_ACCOUNT}'..."
+            CONTAINER_EXISTS=$(az storage container exists --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" --query "exists" -o tsv 2>/dev/null || echo "false")
+            if [ "${CONTAINER_EXISTS}" = "true" ]; then
+              echo "Blob Container '${CONTAINER_NAME}' already exists."
+              CTR_STATUS="Already Exists"
+            else
+              echo "Creating Blob Container '${CONTAINER_NAME}'..."
+              if CREATE_CTR_OUT=$(az storage container create --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" 2>&1); then
+                CTR_STATUS="Created Successfully"
+              else
+                handle_failure "Create Storage Container" "${CREATE_CTR_OUT}"
+              fi
+            fi
+
+            # Generate Success Step Summary
+            {
+              echo "## 🚀 Azure Storage Deployment Summary"
+              echo ""
+              echo "| Parameter | Value |"
+              echo "| --- | --- |"
+              echo "| **Action** | \`create\` |"
+              echo "| **Resource Group** | \`${RG_NAME}\` |"
+              echo "| **RG Status** | ✅ ${RG_STATUS} |"
+              echo "| **Storage Account** | \`${STORAGE_ACCOUNT}\` |"
+              echo "| **Account Status** | ✅ ${SA_STATUS} |"
+              echo "| **Blob Container** | \`${CONTAINER_NAME}\` |"
+              echo "| **Container Status** | ✅ ${CTR_STATUS} |"
+              echo "| **Azure Region** | \`${LOCATION}\` |"
+              echo "| **Overall Status** | ✅ Created / Verified Successfully |"
+              echo ""
+              echo "> Resource Group \`${RG_NAME}\`, Storage Account \`${STORAGE_ACCOUNT}\`, and Blob Container \`${CONTAINER_NAME}\` are ready."
+            } >> $GITHUB_STEP_SUMMARY
+
+          elif [ "${ACTION}" = "delete" ]; then
+            echo "============================================="
+            echo "🗑️ Starting DELETE Operation (Target: ${DELETE_TARGET})"
+            echo "============================================="
+
+            if [ "${DELETE_TARGET}" = "entire_resource_group" ]; then
+              echo "Checking if Resource Group '${RG_NAME}' exists..."
+              RG_EXISTS=$(az group exists --name "${RG_NAME}" --output tsv)
+              if [ "${RG_EXISTS}" = "true" ]; then
+                echo "Deleting Resource Group '${RG_NAME}'..."
+                if DEL_RG_OUT=$(az group delete --name "${RG_NAME}" --yes 2>&1); then
+                  DEL_STATUS="Resource Group Deleted"
+                  DEL_NOTE="Resource Group \`${RG_NAME}\` and all contained resources (including storage accounts & containers) were deleted."
+                else
+                  handle_failure "Delete Resource Group" "${DEL_RG_OUT}"
+                fi
+              else
+                DEL_STATUS="Not Found (Skipped)"
+                DEL_NOTE="Resource Group \`${RG_NAME}\` does not exist or was already deleted."
+              fi
+
+            elif [ "${DELETE_TARGET}" = "storage_account" ]; then
+              echo "Checking if Storage Account '${STORAGE_ACCOUNT}' exists in '${RG_NAME}'..."
+              if az storage account show --name "${STORAGE_ACCOUNT}" --resource-group "${RG_NAME}" --output none 2>/dev/null; then
+                echo "Deleting Storage Account '${STORAGE_ACCOUNT}'..."
+                if DEL_SA_OUT=$(az storage account delete --name "${STORAGE_ACCOUNT}" --resource-group "${RG_NAME}" --yes 2>&1); then
+                  DEL_STATUS="Storage Account Deleted"
+                  DEL_NOTE="Storage Account \`${STORAGE_ACCOUNT}\` and its containers were deleted from \`${RG_NAME}\`."
+                else
+                  handle_failure "Delete Storage Account" "${DEL_SA_OUT}"
+                fi
+              else
+                DEL_STATUS="Not Found (Skipped)"
+                DEL_NOTE="Storage Account \`${STORAGE_ACCOUNT}\` was not found in Resource Group \`${RG_NAME}\`."
+              fi
+
+            else # container_only
+              echo "Checking if Blob Container '${CONTAINER_NAME}' exists in '${STORAGE_ACCOUNT}'..."
+              CONTAINER_EXISTS=$(az storage container exists --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" --query "exists" -o tsv 2>/dev/null || echo "false")
+              if [ "${CONTAINER_EXISTS}" = "true" ]; then
+                echo "Deleting Blob Container '${CONTAINER_NAME}'..."
+                if DEL_CTR_OUT=$(az storage container delete --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" 2>&1); then
+                  DEL_STATUS="Blob Container Deleted"
+                  DEL_NOTE="Blob Container \`${CONTAINER_NAME}\` was deleted from Storage Account \`${STORAGE_ACCOUNT}\`."
+                else
+                  handle_failure "Delete Blob Container" "${DEL_CTR_OUT}"
+                fi
+              else
+                DEL_STATUS="Not Found (Skipped)"
+                DEL_NOTE="Blob Container \`${CONTAINER_NAME}\` was not found in Storage Account \`${STORAGE_ACCOUNT}\`."
+              fi
+            fi
+
+            # Generate Deletion Step Summary
+            {
+              echo "## 🗑️ Azure Storage Deletion Summary"
+              echo ""
+              echo "| Parameter | Value |"
+              echo "| --- | --- |"
+              echo "| **Action** | \`delete\` |"
+              echo "| **Delete Target** | \`${DELETE_TARGET}\` |"
+              echo "| **Resource Group** | \`${RG_NAME}\` |"
+              echo "| **Storage Account** | \`${STORAGE_ACCOUNT}\` |"
+              echo "| **Blob Container** | \`${CONTAINER_NAME}\` |"
+              echo "| **Result** | 🗑️ ${DEL_STATUS} |"
+              echo "| **Overall Status** | ✅ Completed |"
+              echo ""
+              echo "> ${DEL_NOTE}"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
