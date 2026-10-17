@@ -89,6 +89,39 @@ echo "------------------------------------------------------"
    - **Audience**: `api://AzureADTokenExchange` (default).
 5. Click **Add**.
 
+---
+
+### 🔍 Finding Repository & Organization IDs via "View Page Source"
+
+If you want to verify or configure immutable claims for your repository or organization in Entra ID / OIDC trust:
+
+#### 1. Via Browser ("View Page Source")
+1. Open your repository on GitHub in any web browser.
+2. Press **`Ctrl + U`** (or right-click anywhere on the page and click **View Page Source**).
+3. Press **`Ctrl + F`** and search for:
+   - **Repository ID**:
+     ```html
+     <meta name="octolytics-dimension-repository_id" content="123456789" />
+     ```
+     👉 The number in `content="..."` is your unique **`repository_id`**.
+   - **Organization / User ID**:
+     ```html
+     <meta name="octolytics-dimension-user_id" content="98765432" />
+     ```
+     👉 The number in `content="..."` is your unique **`repository_owner_id`** (Org/User ID).
+
+#### 2. Quick CLI Alternative
+```bash
+# Get Repository ID
+curl -s https://api.github.com/repos/<ORG>/<REPO> | grep '"id":' | head -n 1
+
+# Get Org / User ID
+curl -s https://api.github.com/users/<ORG> | grep '"id":' | head -n 1
+```
+
+> [!NOTE]
+> **Why use numeric IDs?** GitHub OIDC tokens emit `repository_id` and `repository_owner_id` claims in addition to the repository name. Referencing these IDs ensures your Federated Credential remains valid and secure even if your GitHub username, organization name, or repository name is renamed in the future.
+
 #### Step C: Assign RBAC Permissions
 1. Navigate to **Subscriptions** > Select your Subscription (or target Resource Group).
 2. Go to **Access control (IAM)** > **Add** > **Add role assignment**.

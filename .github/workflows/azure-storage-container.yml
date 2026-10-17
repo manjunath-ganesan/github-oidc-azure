@@ -28,7 +28,7 @@ on:
       azure_region:
         description: 'Azure Region / Location'
         required: false
-        default: 'eastus'
+        default: 'central-india'
         type: string
       delete_target:
         description: 'Target to delete when action is "delete"'
@@ -63,12 +63,21 @@ jobs:
           RG_NAME="${{ inputs.resource_group_name }}"
           STORAGE_ACCOUNT="${{ inputs.storage_account_name }}"
           CONTAINER_NAME="${{ inputs.container_name }}"
-          LOCATION="${{ inputs.azure_region }}"
+          RAW_LOCATION="${{ inputs.azure_region }}"
           DELETE_TARGET="${{ inputs.delete_target }}"
+          # Normalize Azure region names (e.g., central-india -> centralindia)
+          LOCATION=$(echo "${RAW_LOCATION}" | tr -d '-' | tr -d ' ' | tr '[:upper:]' '[:lower:]')
 
           handle_failure() {
             local FAILED_STEP="$1"
             local ERROR_OUTPUT="$2"
+
+            echo "::error::[${FAILED_STEP}] ${ERROR_OUTPUT}"
+            echo "" >&2
+            echo "❌ ERROR during step: ${FAILED_STEP}" >&2
+            echo "----------------------------------------" >&2
+            echo "${ERROR_OUTPUT}" >&2
+            echo "----------------------------------------" >&2
 
             {
               echo "## ❌ Azure Operation Failed"
@@ -104,10 +113,9 @@ jobs:
 
             # 1. Resource Group
             echo "Checking if Resource Group '${RG_NAME}' exists..."
-            RG_EXISTS=$(az group exists --name "${RG_NAME}" --output tsv)
-            if [ "${RG_EXISTS}" = "true" ]; then
-              echo "Resource Group '${RG_NAME}' already exists."
-              RG_STATUS="Already Exists"
+            if az group exists --name "${RG_NAME}" | grep -qi "true"; then
+              echo "Resource Group '${RG_NAME}' already exists. Skipping creation."
+              RG_STATUS="Already Exists (Skipped)"
             else
               echo "Creating Resource Group '${RG_NAME}' in '${LOCATION}'..."
               if CREATE_RG_OUT=$(az group create --name "${RG_NAME}" --location "${LOCATION}" 2>&1); then
@@ -120,9 +128,19 @@ jobs:
             # 2. Storage Account
             echo "Checking if Storage Account '${STORAGE_ACCOUNT}' exists in '${RG_NAME}'..."
             if az storage account show --name "${STORAGE_ACCOUNT}" --resource-group "${RG_NAME}" --output none 2>/dev/null; then
-              echo "Storage Account '${STORAGE_ACCOUNT}' already exists."
-              SA_STATUS="Already Exists"
+              echo "Storage Account '${STORAGE_ACCOUNT}' already exists. Skipping creation."
+              SA_STATUS="Already Exists (Skipped)"
             else
+              # Check global name availability before attempting create
+              echo "Checking global name availability for '${STORAGE_ACCOUNT}'..."
+              CHECK_AVAIL=$(az storage account check-name --name "${STORAGE_ACCOUNT}" -o json 2>/dev/null || echo "{}")
+              IS_AVAIL=$(echo "${CHECK_AVAIL}" | jq -r '.nameAvailable // empty')
+              AVAIL_MSG=$(echo "${CHECK_AVAIL}" | jq -r '.message // empty')
+
+              if [ "${IS_AVAIL}" = "false" ]; then
+                handle_failure "Create Storage Account" "Storage account name '${STORAGE_ACCOUNT}' is globally unavailable in Azure. ${AVAIL_MSG:-The name is already taken by another Azure customer.} Please choose a globally unique name."
+              fi
+
               echo "Creating Storage Account '${STORAGE_ACCOUNT}'..."
               if CREATE_SA_OUT=$(az storage account create \
                 --name "${STORAGE_ACCOUNT}" \
@@ -138,10 +156,9 @@ jobs:
 
             # 3. Storage Blob Container
             echo "Checking if Blob Container '${CONTAINER_NAME}' exists in '${STORAGE_ACCOUNT}'..."
-            CONTAINER_EXISTS=$(az storage container exists --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" --query "exists" -o tsv 2>/dev/null || echo "false")
-            if [ "${CONTAINER_EXISTS}" = "true" ]; then
-              echo "Blob Container '${CONTAINER_NAME}' already exists."
-              CTR_STATUS="Already Exists"
+            if az storage container exists --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" --query "exists" -o tsv 2>/dev/null | grep -qi "true"; then
+              echo "Blob Container '${CONTAINER_NAME}' already exists. Skipping creation."
+              CTR_STATUS="Already Exists (Skipped)"
             else
               echo "Creating Blob Container '${CONTAINER_NAME}'..."
               if CREATE_CTR_OUT=$(az storage container create --account-name "${STORAGE_ACCOUNT}" --name "${CONTAINER_NAME}" 2>&1); then
